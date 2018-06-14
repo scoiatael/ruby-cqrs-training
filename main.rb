@@ -17,8 +17,8 @@ class Events
     end
     Result::SUCCESS
   rescue => e
-    require 'pry'
-
+    binding.pry
+    raise
   end
 
   def each(id, &block)
@@ -30,6 +30,7 @@ class Events
   end
 end
 
+$DB = Hash.new { |k,v| k[v] = [] }
 $EVENTS = Events.new
 class Result < Struct.new(:ok?, :error)
   SUCCESS = new(true, nil)
@@ -100,7 +101,13 @@ def aggregate!(name, id)
 end
 
 def dispatch(command:, params:)
+  puts "dispatching #{command}"
   case command
+  when :AddItemForSale
+    item_name = params.fetch(:name)
+    res = $EVENTS.emit!(name: :ItemAddedForSale,
+                  aggregate_id: item_name, # this should be some kind of id
+                  params: {name: item_name})
   when :OpenSite
     guest_id = params.fetch(:guest_id)
     $EVENTS.emit!(name: :SiteOpened,
@@ -141,18 +148,21 @@ post '/guest/:guest_id' do
 end
 
 def query(query:, params:)
-  DB[query].select(params)
+  $DB[query].select { |row| params.all? { |k,v| row[k] == v } }
 end
 
 $EVENTS.materialize do |name, aggregate_id, params|
+  puts "materializing #{name.inspect}"
   case name
   when :ItemAdded
-    DB[:Cart].insert params.merge(guest_id: aggregate_id)
+    $DB[:Cart] << params.merge(guest_id: aggregate_id)
+  when :ItemAddedForSale
+    $DB[:Items] << params
   end
 end
 
 get '/cart/:guest_id' do
-  query!(
+  query(
     query: :Cart,
     params: {
       guest_id: params.fetch(:guest_id)
@@ -166,4 +176,15 @@ end
 
 after do
   response.body = response.body.to_json
+end
+
+get '/items' do
+  query(
+    query: :Items,
+    params: {}
+  )
+end
+
+['Gameboy', 'AA Battery', 'Toothbrush'].each do |item_name|
+  dispatch(command: :AddItemForSale, params: { name: item_name }) || raise("cannot seed #{item_name}")
 end
