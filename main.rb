@@ -1,8 +1,9 @@
 require 'sinatra'
+require 'pry'
 
 class Events
   def initialize
-    @events = Hash.new { |s, k| s[k] == [] }
+    @events = Hash.new { |s, k| s[k] = [] }
     @listeners = []
   end
 
@@ -14,6 +15,10 @@ class Events
     @listeners.each do |block|
       block.call(name, aggregate_id, params)
     end
+    Result::SUCCESS
+  rescue => e
+    require 'pry'
+
   end
 
   def each(id, &block)
@@ -26,8 +31,16 @@ class Events
 end
 
 $EVENTS = Events.new
-Result = Struct.new(:ok?, :error)
+class Result < Struct.new(:ok?, :error)
+  SUCCESS = new(true, nil)
 
+  def to_json
+    h = {}
+    h[:status] = (ok? ? 'ok' : 'error')
+    h[:error] = error if error
+    h.to_json
+  end
+end
 
 class Guest
   def initialize(id:)
@@ -70,7 +83,7 @@ class Guest
                         # TODO: Validate item exists
                         item_id: params.fetch(:item_id)
                       })
-        Result.new(true, nil)
+        Result::SUCCESS
       else
         Result.new(false, "Guest haven't opened site yet.")
       end
@@ -89,8 +102,11 @@ end
 def dispatch(command:, params:)
   case command
   when :OpenSite
-    $EVENTS.emit!(name: :SiteOpened, params: {
-                    guest_id: params.fetch(:guest_id)
+    guest_id = params.fetch(:guest_id)
+    $EVENTS.emit!(name: :SiteOpened,
+                  aggregate_id: guest_id,
+                  params: {
+                    guest_id: guest_id
                   })
   when :AddItem
     guest_id = params.fetch(:guest_id)
@@ -112,11 +128,6 @@ post '/guest/:guest_id/cart/item/:item_id' do
       item_id: item_id
     }
   )
-
-  {
-    status: result.ok?,
-    error: result.error
-  }
 end
 
 post '/guest/:guest_id' do
@@ -127,17 +138,11 @@ post '/guest/:guest_id' do
       guest_id: guest_id
     }
   )
-
-  {
-    status: result.ok?,
-    error: result.error
-  }
 end
 
 def query(query:, params:)
   DB[query].select(params)
 end
-
 
 $EVENTS.materialize do |name, aggregate_id, params|
   case name
@@ -153,4 +158,12 @@ get '/cart/:guest_id' do
       guest_id: params.fetch(:guest_id)
     }
   )
+end
+
+before do
+  content_type :json
+end
+
+after do
+  response.body = response.body.to_json
 end
