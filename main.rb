@@ -1,8 +1,9 @@
 require 'sinatra'
+require 'pry'
 
 class Events
   def initialize
-    @events = Hash.new { |s, k| s[k] == [] }
+    @events = Hash.new { |s, k| s[k] = [] }
     @listeners = []
   end
 
@@ -14,6 +15,7 @@ class Events
     @listeners.each do |block|
       block.call(name, aggregate_id, params)
     end
+    Result::SUCCESS
   end
 
   def each(id, &block)
@@ -25,9 +27,28 @@ class Events
   end
 end
 
-$EVENTS = Events.new
-Result = Struct.new(:ok?, :error)
+class Shipping
+  def self.start!(user_id, items)
+    OpenStruct.new(ok?: true, address: 'Privet Drive 7, London')
+  end
+end
 
+$DB = Hash.new { |k,v| k[v] = [] }
+$EVENTS = Events.new
+class Result < Struct.new(:ok?, :error)
+  SUCCESS = new(true, nil)
+
+  def to_json
+    h = {}
+    h[:status] = (ok? ? 'ok' : 'error')
+    h[:error] = error if error
+    h.to_json
+  end
+
+  def self.failure(error)
+    new false, error
+  end
+end
 
 class Guest
   def initialize(id:)
@@ -37,6 +58,7 @@ class Guest
   end
 
   def apply(name:, params:)
+    puts "appling #{name.inspect} to #{self.class.name}"
     case name
     when :SiteOpened
       @site_opened = true
@@ -47,8 +69,12 @@ class Guest
 
   def handle!(command:, params:)
     case command
-    when :CartCheckout
-      if @items.present?
+    when :CheckoutCart
+      if not @site_opened
+        Result.failure("Site is not opened.")
+      elsif @items.none?
+        Result.failure("Empty cart")
+      else
         result = Shipping.start!(@id, @items)
         if result.ok?
           $EVENTS.emit!(name: :CartCheckedout, aggregate_id: @id, params: {
@@ -60,8 +86,6 @@ class Guest
                           items: @items
                         })
         end
-      else
-        Result.new(false, "Empty cart")
       end
     when :AddItem
       if @site_opened
@@ -70,9 +94,9 @@ class Guest
                         # TODO: Validate item exists
                         item_id: params.fetch(:item_id)
                       })
-        Result.new(true, nil)
+        Result::SUCCESS
       else
-        Result.new(false, "Guest haven't opened site yet.")
+        Result.failure("Guest haven't opened site yet.")
       end
     else
       raise RuntimeError, "#{self.class.name} can't handle #{command}"
@@ -81,23 +105,37 @@ class Guest
 end
 
 def aggregate!(name, id)
-  fresh = const_get(name).new(id)
-  $EVENTS.each(id) { |event| fresh.apply(event[:name], event[:params]) }
+  fresh = Object.const_get(name).new(id: id)
+  $EVENTS.each(id) do |event|
+    fresh.apply(
+      name: event[:name],
+      params: event[:params]
+    )
+  end
   fresh
 end
 
 def dispatch(command:, params:)
+  puts "dispatching #{command}"
   case command
+  when :AddItemForSale
+    item_name = params.fetch(:name)
+    res = $EVENTS.emit!(name: :ItemAddedForSale,
+                  aggregate_id: item_name, # this should be some kind of id
+                  params: {name: item_name})
   when :OpenSite
-    $EVENTS.emit!(name: :SiteOpened, params: {
-                    guest_id: params.fetch(:guest_id)
+    guest_id = params.fetch(:guest_id)
+    $EVENTS.emit!(name: :SiteOpened,
+                  aggregate_id: guest_id,
+                  params: {
+                    guest_id: guest_id
                   })
-  when :AddItem
+  when :AddItem, :CheckoutCart
     guest_id = params.fetch(:guest_id)
     guest = aggregate!(:Guest, guest_id)
     guest.handle!(command: command, params: params)
   else
-    Result.new(false, 'Unknown command')
+    Result.failure('Unknown command')
   end
 end
 
@@ -112,11 +150,6 @@ post '/guest/:guest_id/cart/item/:item_id' do
       item_id: item_id
     }
   )
-
-  {
-    status: result.ok?,
-    error: result.error
-  }
 end
 
 post '/guest/:guest_id' do
@@ -127,30 +160,67 @@ post '/guest/:guest_id' do
       guest_id: guest_id
     }
   )
-
-  {
-    status: result.ok?,
-    error: result.error
-  }
 end
 
 def query(query:, params:)
-  DB[query].select(params)
+  {
+    query => $DB[query].select { |row| params.all? { |k,v| row[k] == v } }
+  }
 end
 
-
 $EVENTS.materialize do |name, aggregate_id, params|
+  puts "materializing #{name.inspect}"
   case name
   when :ItemAdded
-    DB[:Cart].insert params.merge(guest_id: aggregate_id)
+    $DB[:Cart] << params.merge(guest_id: aggregate_id)
+  when :ItemAddedForSale
+    $DB[:Items] << params
   end
 end
 
 get '/cart/:guest_id' do
-  query!(
+  query(
     query: :Cart,
     params: {
       guest_id: params.fetch(:guest_id)
     }
   )
 end
+
+before do
+  content_type :json
+end
+
+after do
+  response.body = response.body.to_json
+end
+
+get '/items' do
+  query(
+    query: :Items,
+    params: {}
+  )
+end
+
+def dispatch!(*args)
+  response = dispatch(*args)
+  raise RuntimeError, 'response is nil' if response.nil?
+  response.ok? || raise("dispatch failed for #{args.to_json}")
+  response
+rescue => e
+  STDERR.puts "#{e.class.name} #{e.message}"
+  e.backtrace.each { |l| STDERR.puts l }
+  raise
+end
+
+dispatch!(command: :AddItemForSale, params: { name: 'Gameboy' })
+dispatch!(command: :AddItemForSale, params: { name: 'AA Battery' })
+dispatch!(command: :AddItemForSale, params: { name: 'Toothbrush' })
+dispatch!(command: :OpenSite, params: { guest_id: 'Foobert' })
+puts query(query: :Items, params: {})
+puts query(query: :GuestCart, params: { guest_id: 'Foobert' })
+dispatch!(command: :AddItem, params: { item_id: 'Gameboy', guest_id: 'Foobert' })
+dispatch!(command: :AddItem, params: { item_id: 'AA Battery', guest_id: 'Foobert' })
+dispatch!(command: :AddItem, params: { item_id: 'AA Battery', guest_id: 'Foobert' })
+dispatch!(command: :CheckoutCart, params: { guest_id: 'Foobert' })
+

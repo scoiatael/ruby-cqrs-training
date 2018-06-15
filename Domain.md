@@ -25,6 +25,8 @@ Let's say we are working on e-commerce. We will build a very simple shopping app
   Issued by our greatest Application to date when customer wants something in cart
 * CheckoutCart -> CartCheckedOut := POST /command/checkout_cart
   Again, application tells us to ship.
+* AddItemForSale -> ItemAddedForSale
+  Creates item for sale
 #### Queries
 * GuestCart := GET /query/guest_cart/:guest_id
   Shows what we currently have in Cart
