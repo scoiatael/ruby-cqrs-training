@@ -16,9 +16,6 @@ class Events
       block.call(name, aggregate_id, params)
     end
     Result::SUCCESS
-  rescue => e
-    binding.pry
-    raise
   end
 
   def each(id, &block)
